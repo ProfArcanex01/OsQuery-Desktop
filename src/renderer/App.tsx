@@ -21,6 +21,8 @@ export interface QueryState {
   isSummarizing: boolean
   isTranslating: boolean
   bookmarkNotice: string
+  isRepairing: boolean
+  osqueryLogs: string[]
 }
 
 const DEFAULT_STATE: QueryState = {
@@ -33,7 +35,9 @@ const DEFAULT_STATE: QueryState = {
   isRunning: false,
   isSummarizing: false,
   isTranslating: false,
-  bookmarkNotice: ''
+  bookmarkNotice: '',
+  isRepairing: false,
+  osqueryLogs: []
 }
 
 export default function App(): JSX.Element {
@@ -42,6 +46,20 @@ export default function App(): JSX.Element {
 
   const updateState = (partial: Partial<QueryState>): void =>
     setState((s) => ({ ...s, ...partial }))
+
+  // Subscribe to osquery stderr stream for console view.
+  useEffect(() => {
+    if (!window.api?.onOsqueryStderr) return
+    const dispose = window.api.onOsqueryStderr((message: string) => {
+      setState((s) => ({
+        ...s,
+        osqueryLogs: [...s.osqueryLogs, message]
+      }))
+    })
+    return () => {
+      dispose?.()
+    }
+  }, [])
 
   // Translate NL → SQL
   const handleTranslate = useCallback(async (question: string) => {
@@ -57,9 +75,19 @@ export default function App(): JSX.Element {
 
   // Run SQL
   const handleRun = useCallback(async (sql: string) => {
-    updateState({ isRunning: true, error: null, summary: '', rows: [] })
+    updateState({ isRunning: true, isRepairing: false, error: null, summary: '', rows: [] })
     try {
       const result = await window.api.runQuery(sql, state.nlInput || undefined)
+      if (result.error) {
+        updateState({
+          rows: result.rows,
+          executionTimeMs: result.executionTimeMs,
+          error: result.error,
+          isRunning: false
+        })
+        return
+      }
+
       updateState({
         rows: result.rows,
         executionTimeMs: result.executionTimeMs,
@@ -79,6 +107,20 @@ export default function App(): JSX.Element {
       updateState({ error: e.message, isRunning: false })
     }
   }, [state.nlInput])
+
+  const handleRepairSQL = useCallback(async () => {
+    if (!state.error || !state.sql.trim()) return
+    updateState({ isRepairing: true })
+    try {
+      const { sql } = await window.api.repairSQL(state.sql, state.error, state.nlInput || undefined)
+      updateState({ sql, isRepairing: false, error: null })
+    } catch (e: any) {
+      updateState({
+        isRepairing: false,
+        error: e.message ?? 'Failed to repair SQL using the LLM.'
+      })
+    }
+  }, [state.error, state.nlInput, state.sql])
 
   const handleHistorySelect = (sql: string): void => {
     updateState({ sql, nlInput: '' })
@@ -126,6 +168,16 @@ export default function App(): JSX.Element {
                 {t}
               </button>
             ))}
+            <button
+              onClick={() => setTab('query')}
+              className={`px-3 py-1 text-xs rounded-md capitalize transition-colors ${
+                tab === 'query'
+                  ? 'bg-slate-700 text-white'
+                  : 'text-slate-400 hover:text-white hover:bg-slate-800'
+              }`}
+            >
+              console
+            </button>
           </div>
         </div>
 
@@ -157,6 +209,29 @@ export default function App(): JSX.Element {
                 <div className="min-w-0 flex-1">
                   <div className="font-medium text-red-200">Error</div>
                   <div className="text-xs text-red-100/90 selectable break-words">{state.error}</div>
+                  <div className="mt-1.5 flex flex-wrap gap-2">
+                    <button
+                      onClick={handleRepairSQL}
+                      disabled={state.isRepairing || !state.sql.trim()}
+                      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium transition-all ${
+                        state.isRepairing
+                          ? 'bg-indigo-900/60 text-indigo-200 cursor-not-allowed'
+                          : 'bg-indigo-700/80 hover:bg-indigo-600 text-white'
+                      }`}
+                    >
+                      {state.isRepairing ? (
+                        <>
+                          <span className="w-3 h-3 border-2 border-indigo-300 border-t-transparent rounded-full animate-spin" />
+                          Asking LLM to fix…
+                        </>
+                      ) : (
+                        <>
+                          <span>✨</span>
+                          Fix SQL with LLM
+                        </>
+                      )}
+                    </button>
+                  </div>
                 </div>
                 <button
                   onClick={() => updateState({ error: null })}
@@ -187,6 +262,28 @@ export default function App(): JSX.Element {
                 isLoading={state.isRunning}
               />
             </div>
+
+            {/* Osquery console */}
+            {state.osqueryLogs.length > 0 && (
+              <div className="mt-2 flex-1 min-h-0 rounded-lg border border-slate-700/70 bg-black/40 text-xs text-slate-200 overflow-hidden flex flex-col">
+                <div className="px-3 py-1.5 border-b border-slate-700/70 flex items-center justify-between">
+                  <span className="font-semibold text-slate-300">Osquery Console</span>
+                  <button
+                    onClick={() => updateState({ osqueryLogs: [] })}
+                    className="text-[11px] text-slate-400 hover:text-slate-200"
+                  >
+                    Clear
+                  </button>
+                </div>
+                <div className="flex-1 overflow-auto px-3 py-2 font-mono whitespace-pre-wrap space-y-0.5">
+                  {state.osqueryLogs.map((line, idx) => (
+                    <div key={idx} className="selectable">
+                      {line}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
 

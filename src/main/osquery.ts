@@ -1,4 +1,5 @@
 import { spawn, ChildProcessWithoutNullStreams } from 'child_process'
+import { EventEmitter } from 'events'
 import { join } from 'path'
 import { existsSync } from 'fs'
 
@@ -8,6 +9,8 @@ export interface QueryResult {
   executionTimeMs: number
 }
 
+export const osqueryEvents = new EventEmitter()
+
 export class OsqueryManager {
   private proc: ChildProcessWithoutNullStreams | null = null
   private buffer = ''
@@ -16,6 +19,7 @@ export class OsqueryManager {
     resolve: (v: QueryResult) => void
     reject: (e: Error) => void
     startTime: number
+    settled: boolean
   }> = []
 
   /** Resolve path to bundled osqueryi binary */
@@ -50,9 +54,7 @@ export class OsqueryManager {
     })
 
     this.proc.stdout.on('data', (chunk: Buffer) => this.handleData(chunk.toString()))
-    this.proc.stderr.on('data', (chunk: Buffer) => {
-      console.log('[osquery stderr]', chunk.toString())
-    })
+    this.proc.stderr.on('data', (chunk: Buffer) => this.handleStderr(chunk.toString()))
     this.proc.on('error', (err) => {
       console.error('[osquery] Process error:', err)
       this.flushPending(err)
@@ -106,6 +108,17 @@ export class OsqueryManager {
 
   private handleData(chunk: string): void {
     this.buffer += chunk
+    this.buffer = this.buffer.replace(/^osquery>\s*/g, '')
+
+    const pendingError = this.pendingResolvers[0]
+    if (pendingError && pendingError.settled) {
+      const promptIndex = this.buffer.lastIndexOf('osquery>')
+      if (promptIndex !== -1) {
+        this.buffer = this.buffer.slice(promptIndex + 'osquery>'.length)
+      }
+      return
+    }
+
     // osqueryi returns one JSON array per query, terminated by newline after ]
     const match = this.buffer.match(/([\s\S]*?\])\s*\n?osquery>/)
     if (match || this.buffer.trimEnd().endsWith(']')) {
@@ -114,9 +127,11 @@ export class OsqueryManager {
 
       const resolver = this.pendingResolvers.shift()
       if (!resolver) return
+      if (resolver.settled) return
 
       try {
         const rows = JSON.parse(jsonStr)
+        resolver.settled = true
         resolver.resolve({
           rows,
           executionTimeMs: Date.now() - resolver.startTime
@@ -125,6 +140,28 @@ export class OsqueryManager {
         resolver.reject(new Error(`JSON parse error: ${e}`))
       }
     }
+  }
+
+  private handleStderr(chunk: string): void {
+    const message = chunk.toString().trim()
+    if (!message) return
+
+    console.log('[osquery stderr]', message)
+
+    // Emit all stderr messages so the UI can render them in a console view.
+    osqueryEvents.emit('stderr', message)
+
+    const resolver = this.pendingResolvers[0]
+    if (!resolver || resolver.settled) return
+
+    // Surface SQLite and osquery CLI errors to the renderer instead of only logging them.
+    resolver.settled = true
+    this.pendingResolvers.shift()
+    resolver.resolve({
+      rows: [],
+      error: message,
+      executionTimeMs: Date.now() - resolver.startTime
+    })
   }
 
   private flushPending(err: Error): void {
@@ -138,7 +175,7 @@ export class OsqueryManager {
       throw new Error('osquery is not running')
     }
     return new Promise((resolve, reject) => {
-      this.pendingResolvers.push({ resolve, reject, startTime: Date.now() })
+      this.pendingResolvers.push({ resolve, reject, startTime: Date.now(), settled: false })
       this.proc!.stdin.write(sql.trim() + ';\n')
     })
   }

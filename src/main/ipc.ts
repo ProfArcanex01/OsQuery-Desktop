@@ -16,6 +16,22 @@ export function registerIpcHandlers(): void {
     return result
   })
 
+  ipcMain.handle(
+    'query:repair-sql',
+    async (_event, sql: string, error: string, nlInput?: string) => {
+      const provider = createLLMProvider(settingsStore)
+      const tableNames = schemaCache.inferRelevantTables(nlInput || sql)
+      const schemaCtx = schemaCache.getSchemaContext(tableNames)
+      const repaired = await provider.translateToSQL(
+        nlInput
+          ? `${nlInput}\n\nThe previous SQL failed with error:\n${error}\n\nPrevious SQL:\n${sql}`
+          : `The following osquery SQL failed with error:\n${error}\n\nSQL:\n${sql}\n\nPlease return a corrected osquery SQL query only.`,
+        schemaCtx
+      )
+      return { sql: repaired }
+    }
+  )
+
   // ── Schema ─────────────────────────────────────────────────────────────
   ipcMain.handle('schema:list', () => schemaCache.getAllTableNames())
 

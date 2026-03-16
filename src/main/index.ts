@@ -1,7 +1,7 @@
 import { app, BrowserWindow, shell } from 'electron'
 import { join } from 'path'
 import { registerIpcHandlers } from './ipc'
-import { OsqueryManager } from './osquery'
+import { OsqueryManager, osqueryEvents } from './osquery'
 import { HistoryStore } from './history'
 import { SchemaCache } from './schema'
 import { AgentService } from './agent'
@@ -51,6 +51,12 @@ function createWindow(): void {
   } else {
     mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
   }
+
+  // Forward osquery stderr messages to the renderer so they can be shown in a console UI.
+  osqueryEvents.on('stderr', (message: string) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return
+    mainWindow.webContents.send('osquery:stderr', message)
+  })
 }
 
 app.whenReady().then(async () => {

@@ -33,7 +33,20 @@ export const api = {
 
   // ── Settings ─────────────────────────────────────────────────────────
   getSettings: () => ipcRenderer.invoke('settings:get'),
-  setSetting: (key: string, value: string) => ipcRenderer.invoke('settings:set', key, value)
+  setSetting: (key: string, value: string) => ipcRenderer.invoke('settings:set', key, value),
+
+  // ── Query Repair ─────────────────────────────────────────────────────
+  repairSQL: (sql: string, error: string, nlInput?: string) =>
+    ipcRenderer.invoke('query:repair-sql', sql, error, nlInput),
+
+  // ── Osquery Console / Logs ───────────────────────────────────────────
+  onOsqueryStderr: (handler: (message: string) => void): (() => void) => {
+    const listener = (_event: unknown, message: string) => handler(message)
+    ipcRenderer.on('osquery:stderr', listener)
+    return () => {
+      ipcRenderer.removeListener('osquery:stderr', listener)
+    }
+  }
 }
 
 contextBridge.exposeInMainWorld('api', api)
