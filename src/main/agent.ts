@@ -1,4 +1,5 @@
 import Store from 'electron-store'
+import { z } from 'zod'
 import { createLLMProvider } from './llm'
 import { OsqueryManager, QueryResult } from './osquery'
 import { SchemaCache } from './schema'
@@ -41,6 +42,21 @@ export interface InvestigationExecution {
   report: string
 }
 
+const investigationPlanSchema: z.ZodType<InvestigationPlan> = z.object({
+  goal: z.string().trim().min(1).max(20_000),
+  scope: z.string().trim().min(1).max(20_000),
+  approvalNote: z.string().trim().min(1).max(20_000),
+  steps: z.array(
+    z.object({
+      id: z.string().trim().min(1).max(200),
+      title: z.string().trim().min(1).max(500),
+      objective: z.string().trim().min(1).max(5_000),
+      sql: z.string().trim().min(1).max(50_000),
+      expectedSignal: z.string().trim().min(1).max(5_000)
+    })
+  ).min(1).max(10)
+})
+
 export class AgentService {
   constructor(
     private osqueryManager: OsqueryManager,
@@ -52,16 +68,17 @@ export class AgentService {
   async createPlan(goal: string): Promise<InvestigationPlan> {
     const provider = createLLMProvider(this.store)
     const schemaContext = this.schemaCache.getInvestigationSchemaContext(goal)
-    return provider.planInvestigation(goal, schemaContext)
+    return investigationPlanSchema.parse(await provider.planInvestigation(goal, schemaContext))
   }
 
   // Execute the approved plan step by step, attempting a single SQL repair when a step fails.
   async executePlan(plan: InvestigationPlan): Promise<InvestigationExecution> {
+    const parsedPlan = investigationPlanSchema.parse(plan)
     const provider = createLLMProvider(this.store)
     const startedAt = new Date().toISOString()
     const steps: InvestigationExecutionStep[] = []
 
-    for (const step of plan.steps) {
+    for (const step of parsedPlan.steps) {
       let result: QueryResult | null = null
       let finalSql = step.sql
       let error: string | null = null
@@ -69,6 +86,10 @@ export class AgentService {
 
       try {
         result = await this.osqueryManager.runQuery(finalSql)
+        if (result.error) {
+          error = result.error
+          result = null
+        }
       } catch (err: any) {
         error = err.message ?? String(err)
       }
@@ -76,13 +97,13 @@ export class AgentService {
       if (!result && error) {
         try {
           const repaired = await provider.repairInvestigationSQL({
-            goal: plan.goal,
+            goal: parsedPlan.goal,
             stepTitle: step.title,
             stepObjective: step.objective,
             sql: finalSql,
             error,
             schemaContext: this.schemaCache.getInvestigationSchemaContext(
-              `${plan.goal}\n${step.title}\n${step.objective}`
+              `${parsedPlan.goal}\n${step.title}\n${step.objective}`
             )
           })
 
@@ -90,7 +111,12 @@ export class AgentService {
             finalSql = repaired.sql
             repairNotes.push(repaired.reason)
             result = await this.osqueryManager.runQuery(finalSql)
-            error = null
+            if (result.error) {
+              error = result.error
+              result = null
+            } else {
+              error = null
+            }
           }
         } catch (repairErr: any) {
           repairNotes.push(repairErr.message ?? String(repairErr))
@@ -115,15 +141,15 @@ export class AgentService {
 
     const completedAt = new Date().toISOString()
     const report = await provider.generateInvestigationReport({
-      goal: plan.goal,
-      scope: plan.scope,
+      goal: parsedPlan.goal,
+      scope: parsedPlan.scope,
       startedAt,
       completedAt,
       steps
     })
 
     return {
-      plan,
+      plan: parsedPlan,
       startedAt,
       completedAt,
       steps,

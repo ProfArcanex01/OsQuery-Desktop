@@ -42,37 +42,53 @@ export class SchemaCache {
     this.osquery = osquery
   }
 
-  async init(): Promise<void> {
-    try {
-      // Fetch all table names
-      const tableResult = await this.osquery.runQuery(
-        'SELECT name FROM osquery_registry WHERE registry = "table" AND internal = 0 AND active = 1'
-      )
-      const tableNames = tableResult.rows.map((r) => r.name)
+  async init(): Promise<number> {
+    this.tables.clear()
 
-      // Fetch column info for all tables at once via osquery_info
-      for (const tableName of tableNames) {
-        try {
-          const colResult = await this.osquery.runQuery(
-            `SELECT name, type FROM pragma_table_info("${tableName}")`
-          )
-          this.tables.set(tableName, {
-            name: tableName,
-            columns: colResult.rows.map((r) => ({
-              name: r.name,
-              type: r.type || 'TEXT',
-              description: ''
-            }))
-          })
-        } catch {
-          // Skip tables that fail
-        }
-      }
+    // Fetch all table names
+    const tableResult = await this.osquery.runQuery(
+      'SELECT name FROM osquery_registry WHERE registry = "table" AND internal = 0 AND active = 1'
+    )
 
-      console.log(`[schema] Loaded ${this.tables.size} tables`)
-    } catch (err) {
-      console.error('[schema] Failed to load schema:', err)
+    if (tableResult.error) {
+      throw new Error(tableResult.error)
     }
+
+    const tableNames = tableResult.rows.map((r) => r.name).filter(Boolean)
+    if (tableNames.length === 0) {
+      throw new Error('No osquery tables were returned from osquery_registry.')
+    }
+
+    // Fetch column info for all tables at once via osquery_info
+    for (const tableName of tableNames) {
+      try {
+        const colResult = await this.osquery.runQuery(
+          `SELECT name, type FROM pragma_table_info("${tableName}")`
+        )
+
+        if (colResult.error) {
+          continue
+        }
+
+        this.tables.set(tableName, {
+          name: tableName,
+          columns: colResult.rows.map((r) => ({
+            name: r.name,
+            type: r.type || 'TEXT',
+            description: ''
+          }))
+        })
+      } catch {
+        // Skip tables that fail
+      }
+    }
+
+    if (this.tables.size === 0) {
+      throw new Error('Schema initialization completed but no table metadata could be loaded.')
+    }
+
+    console.log(`[schema] Loaded ${this.tables.size} tables`)
+    return this.tables.size
   }
 
   getAllTableNames(): string[] {

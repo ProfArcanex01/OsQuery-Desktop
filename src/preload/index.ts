@@ -34,6 +34,14 @@ export const api = {
   // ── Settings ─────────────────────────────────────────────────────────
   getSettings: () => ipcRenderer.invoke('settings:get'),
   setSetting: (key: string, value: string) => ipcRenderer.invoke('settings:set', key, value),
+  getSystemHealth: () => ipcRenderer.invoke('system:get-health'),
+  onSystemHealth: (handler: (health: unknown) => void): (() => void) => {
+    const listener = (_event: unknown, health: unknown) => handler(health)
+    ipcRenderer.on('system:health', listener)
+    return () => {
+      ipcRenderer.removeListener('system:health', listener)
+    }
+  },
 
   // ── Query Repair ─────────────────────────────────────────────────────
   repairSQL: (sql: string, error: string, nlInput?: string) =>

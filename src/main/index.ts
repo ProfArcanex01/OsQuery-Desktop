@@ -11,6 +11,18 @@ let mainWindow: BrowserWindow | null = null
 export const osqueryManager = new OsqueryManager()
 export const historyStore = new HistoryStore()
 export const schemaCache = new SchemaCache(osqueryManager)
+export interface SystemHealth {
+  osqueryReady: boolean
+  schemaReady: boolean
+  startupError: string | null
+}
+
+export const systemHealth: SystemHealth = {
+  osqueryReady: false,
+  schemaReady: false,
+  startupError: null
+}
+
 export const settingsStore = new Store<{
   llmProvider: string
   apiKey: string
@@ -19,6 +31,11 @@ export const settingsStore = new Store<{
 }>()
 export const agentService = new AgentService(osqueryManager, schemaCache, settingsStore)
 const isDev = !app.isPackaged
+
+function publishSystemHealth(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  mainWindow.webContents.send('system:health', { ...systemHealth })
+}
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -30,7 +47,7 @@ function createWindow(): void {
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
-      sandbox: false,
+      sandbox: true,
       contextIsolation: true,
       nodeIntegration: false
     }
@@ -41,6 +58,17 @@ function createWindow(): void {
   })
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    let parsed: URL
+    try {
+      parsed = new URL(url)
+    } catch {
+      return { action: 'deny' }
+    }
+
+    if (!['https:', 'mailto:'].includes(parsed.protocol)) {
+      return { action: 'deny' }
+    }
+
     shell.openExternal(url)
     return { action: 'deny' }
   })
@@ -51,6 +79,10 @@ function createWindow(): void {
   } else {
     mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
   }
+
+  mainWindow.webContents.on('did-finish-load', () => {
+    publishSystemHealth()
+  })
 
   // Forward osquery stderr messages to the renderer so they can be shown in a console UI.
   osqueryEvents.on('stderr', (message: string) => {
@@ -82,13 +114,25 @@ app.whenReady().then(async () => {
     })
   })
 
-  // Initialise services
-  await osqueryManager.init()
   historyStore.init()
-  await schemaCache.init()
-
   registerIpcHandlers()
   createWindow()
+
+  try {
+    // Initialise services after the window exists so startup failures can be shown in-app.
+    await osqueryManager.init()
+    systemHealth.osqueryReady = true
+
+    const loadedTables = await schemaCache.init()
+    systemHealth.schemaReady = loadedTables > 0
+    systemHealth.startupError = null
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    systemHealth.osqueryReady = false
+    systemHealth.schemaReady = false
+    systemHealth.startupError = `Failed to initialize osquery: ${message}`
+  }
+  publishSystemHealth()
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

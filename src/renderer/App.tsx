@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo, useTransition } from 'react'
 import { NLInput } from './components/NLInput'
 import { SQLEditor } from './components/SQLEditor'
 import { ResultsTable } from './components/ResultsTable'
@@ -25,6 +25,12 @@ export interface QueryState {
   osqueryLogs: string[]
 }
 
+interface SystemHealth {
+  osqueryReady: boolean
+  schemaReady: boolean
+  startupError: string | null
+}
+
 const DEFAULT_STATE: QueryState = {
   sql: '-- Start typing a question above, or write SQL directly here.\nSELECT * FROM osquery_info LIMIT 5;',
   nlInput: '',
@@ -43,18 +49,56 @@ const DEFAULT_STATE: QueryState = {
 export default function App(): JSX.Element {
   const [tab, setTab] = useState<Tab>('query')
   const [state, setState] = useState<QueryState>(DEFAULT_STATE)
+  const [systemHealth, setSystemHealth] = useState<SystemHealth>({
+    osqueryReady: true,
+    schemaReady: true,
+    startupError: null
+  })
+  const [isPending, startTransition] = useTransition()
 
   const updateState = (partial: Partial<QueryState>): void =>
     setState((s) => ({ ...s, ...partial }))
+
+  const activityLabel = useMemo(() => {
+    if (state.isRunning) return 'Executing osquery command...'
+    if (state.isTranslating) return 'Generating SQL from your prompt...'
+    if (state.isRepairing) return 'Repairing SQL with the LLM...'
+    if (state.isSummarizing) return 'Summarizing query results...'
+    if (isPending) return 'Rendering results...'
+    return null
+  }, [isPending, state.isRepairing, state.isRunning, state.isSummarizing, state.isTranslating])
+
+  useEffect(() => {
+    window.api.getSystemHealth().then((health) => {
+      setSystemHealth(health as SystemHealth)
+    }).catch(() => {
+      setSystemHealth({
+        osqueryReady: false,
+        schemaReady: false,
+        startupError: 'Failed to load backend health status.'
+      })
+    })
+  }, [])
+
+  useEffect(() => {
+    if (!window.api?.onSystemHealth) return
+    return window.api.onSystemHealth((health) => {
+      startTransition(() => {
+        setSystemHealth(health as SystemHealth)
+      })
+    })
+  }, [])
 
   // Subscribe to osquery stderr stream for console view.
   useEffect(() => {
     if (!window.api?.onOsqueryStderr) return
     const dispose = window.api.onOsqueryStderr((message: string) => {
-      setState((s) => ({
-        ...s,
-        osqueryLogs: [...s.osqueryLogs, message]
-      }))
+      startTransition(() => {
+        setState((s) => ({
+          ...s,
+          osqueryLogs: [...s.osqueryLogs, message]
+        }))
+      })
     })
     return () => {
       dispose?.()
@@ -64,17 +108,27 @@ export default function App(): JSX.Element {
   // Translate NL → SQL
   const handleTranslate = useCallback(async (question: string) => {
     if (!question.trim()) return
+    if (!systemHealth.osqueryReady) {
+      updateState({ error: systemHealth.startupError ?? 'osquery is not available.' })
+      return
+    }
     updateState({ isTranslating: true, nlInput: question, error: null })
     try {
       const sql = await window.api.translateToSQL(question)
-      updateState({ sql, isTranslating: false, error: null })
+      startTransition(() => {
+        updateState({ sql, isTranslating: false, error: null })
+      })
     } catch (e: any) {
       updateState({ error: e.message, isTranslating: false })
     }
-  }, [])
+  }, [systemHealth.osqueryReady, systemHealth.startupError])
 
   // Run SQL
   const handleRun = useCallback(async (sql: string) => {
+    if (!systemHealth.osqueryReady) {
+      updateState({ error: systemHealth.startupError ?? 'osquery is not available.' })
+      return
+    }
     updateState({ isRunning: true, isRepairing: false, error: null, summary: '', rows: [] })
     try {
       const result = await window.api.runQuery(sql, state.nlInput || undefined)
@@ -88,17 +142,21 @@ export default function App(): JSX.Element {
         return
       }
 
-      updateState({
-        rows: result.rows,
-        executionTimeMs: result.executionTimeMs,
-        isRunning: false
+      startTransition(() => {
+        updateState({
+          rows: result.rows,
+          executionTimeMs: result.executionTimeMs,
+          isRunning: false
+        })
       })
       // Auto-summarize if there was an NL question
       if (state.nlInput && result.rows.length > 0) {
         updateState({ isSummarizing: true })
         try {
           const summary = await window.api.summarizeResults(state.nlInput, sql, result.rows)
-          updateState({ summary, isSummarizing: false })
+          startTransition(() => {
+            updateState({ summary, isSummarizing: false })
+          })
         } catch {
           updateState({ isSummarizing: false })
         }
@@ -106,10 +164,11 @@ export default function App(): JSX.Element {
     } catch (e: any) {
       updateState({ error: e.message, isRunning: false })
     }
-  }, [state.nlInput])
+  }, [state.nlInput, systemHealth.osqueryReady, systemHealth.startupError])
 
   const handleRepairSQL = useCallback(async () => {
     if (!state.error || !state.sql.trim()) return
+    if (!systemHealth.osqueryReady) return
     updateState({ isRepairing: true })
     try {
       const { sql } = await window.api.repairSQL(state.sql, state.error, state.nlInput || undefined)
@@ -120,7 +179,7 @@ export default function App(): JSX.Element {
         error: e.message ?? 'Failed to repair SQL using the LLM.'
       })
     }
-  }, [state.error, state.nlInput, state.sql])
+  }, [state.error, state.nlInput, state.sql, systemHealth.osqueryReady])
 
   const handleHistorySelect = (sql: string): void => {
     updateState({ sql, nlInput: '' })
@@ -184,12 +243,22 @@ export default function App(): JSX.Element {
         {/* Content */}
         {tab === 'query' && (
           <div className="flex flex-col flex-1 min-h-0 p-3 gap-3">
+            {activityLabel && (
+              <div className="flex items-center gap-3 rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-3 py-2 text-sm text-cyan-100">
+                <span className="h-3 w-3 rounded-full border-2 border-cyan-300 border-t-transparent animate-spin" />
+                <div className="flex-1 min-w-0">
+                  <div className="font-medium text-cyan-200">Working</div>
+                  <div className="text-xs text-cyan-100/90">{activityLabel}</div>
+                </div>
+              </div>
+            )}
+
             {/* NL Input */}
             <NLInput
               value={state.nlInput}
               isTranslating={state.isTranslating}
               onTranslate={handleTranslate}
-              onChange={(v) => updateState({ nlInput: v })}
+              onChange={(v) => updateState({ nlInput: v, error: null })}
             />
 
             {/* Summary */}
@@ -200,6 +269,18 @@ export default function App(): JSX.Element {
             {state.bookmarkNotice && (
               <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
                 {state.bookmarkNotice}
+              </div>
+            )}
+
+            {!systemHealth.osqueryReady && (
+              <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">
+                <div className="font-medium text-amber-200">Startup Diagnostics</div>
+                <div className="mt-1 text-xs break-words">
+                  {systemHealth.startupError ?? 'osquery is unavailable.'}
+                </div>
+                <div className="mt-2 text-xs text-amber-200/80">
+                  Install or bundle `osqueryi`, then relaunch the app.
+                </div>
               </div>
             )}
 
@@ -249,7 +330,7 @@ export default function App(): JSX.Element {
                 onChange={(v) => updateState({ sql: v })}
                 onRun={handleRun}
                 onBookmark={handleBookmark}
-                isRunning={state.isRunning}
+                isRunning={state.isRunning || !systemHealth.osqueryReady}
               />
             </div>
 

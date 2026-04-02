@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   useReactTable,
   getCoreRowModel,
@@ -20,11 +20,26 @@ export function ResultsTable({ rows, error, executionTimeMs, isLoading }: Props)
   const [sorting, setSorting] = useState<SortingState>([])
   const [globalFilter, setGlobalFilter] = useState('')
   const [viewMode, setViewMode] = useState<'table' | 'json'>('table')
+  const [showAllRows, setShowAllRows] = useState(false)
+  const previewLimit = 500
+
+  const visibleRows = useMemo(
+    () => (showAllRows ? rows : rows.slice(0, previewLimit)),
+    [rows, showAllRows]
+  )
+
+  const isPreviewing = !showAllRows && rows.length > previewLimit
+
+  useEffect(() => {
+    if (rows.length <= previewLimit) {
+      setShowAllRows(false)
+    }
+  }, [rows.length])
 
   const columns = useMemo(() => {
-    if (!rows.length) return []
+    if (!visibleRows.length) return []
     const helper = createColumnHelper<Record<string, string>>()
-    return Object.keys(rows[0]).map((key) =>
+    return Object.keys(visibleRows[0]).map((key) =>
       helper.accessor(key, {
         header: key,
         cell: (info) => (
@@ -32,10 +47,10 @@ export function ResultsTable({ rows, error, executionTimeMs, isLoading }: Props)
         )
       })
     )
-  }, [rows])
+  }, [visibleRows])
 
   const table = useReactTable({
-    data: rows,
+    data: visibleRows,
     columns,
     state: { sorting, globalFilter },
     onSortingChange: setSorting,
@@ -104,12 +119,26 @@ export function ResultsTable({ rows, error, executionTimeMs, isLoading }: Props)
             <span className="text-slate-600 ml-2">in {executionTimeMs}ms</span>
           )}
         </span>
+        {isPreviewing && (
+          <span className="text-[11px] text-amber-300">
+            Showing first {previewLimit} rows to keep the UI responsive
+          </span>
+        )}
         <input
           className="ml-auto w-48 text-xs bg-[#0f1117] border border-[#1e293b] rounded px-2 py-1 text-slate-300 placeholder-slate-600 outline-none focus:border-slate-500 selectable"
           placeholder="Filter results…"
           value={globalFilter}
           onChange={(e) => setGlobalFilter(e.target.value)}
         />
+        {rows.length > previewLimit && (
+          <button
+            onClick={() => setShowAllRows((current) => !current)}
+            className="px-2 py-1 text-xs text-slate-400 hover:text-white transition-colors"
+            title={showAllRows ? 'Show preview rows only' : 'Render all rows'}
+          >
+            {showAllRows ? 'Preview Rows' : 'Show All'}
+          </button>
+        )}
         <div className="flex gap-1">
           {(['table', 'json'] as const).map((m) => (
             <button

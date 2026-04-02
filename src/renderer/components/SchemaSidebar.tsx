@@ -2,6 +2,11 @@ import { useState, useEffect, useMemo } from 'react'
 
 interface ColumnDef { name: string; type: string }
 interface TableDef { name: string; columns: ColumnDef[] }
+interface SystemHealth {
+  osqueryReady: boolean
+  schemaReady: boolean
+  startupError: string | null
+}
 
 interface Props {
   onInsertTable: (name: string) => void
@@ -12,9 +17,38 @@ export function SchemaSidebar({ onInsertTable }: Props): JSX.Element {
   const [expanded, setExpanded] = useState<string | null>(null)
   const [tableDetail, setTableDetail] = useState<Record<string, TableDef>>({})
   const [search, setSearch] = useState('')
+  const [isLoading, setIsLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
+
+  const loadTables = async (): Promise<void> => {
+    setIsLoading(true)
+    try {
+      const nextTables = await window.api.listTables()
+      setTables(nextTables)
+      setLoadError(
+        nextTables.length === 0 ? 'Schema is still loading. Retry in a moment.' : null
+      )
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to load tables.'
+      setLoadError(message)
+      setTables([])
+    } finally {
+      setIsLoading(false)
+    }
+  }
 
   useEffect(() => {
-    window.api.listTables().then(setTables)
+    void loadTables()
+  }, [])
+
+  useEffect(() => {
+    if (!window.api?.onSystemHealth) return
+    return window.api.onSystemHealth((health) => {
+      const nextHealth = health as SystemHealth
+      if (nextHealth.schemaReady || nextHealth.startupError) {
+        void loadTables()
+      }
+    })
   }, [])
 
   const filtered = useMemo(
@@ -48,9 +82,27 @@ export function SchemaSidebar({ onInsertTable }: Props): JSX.Element {
 
       {/* Table list */}
       <div className="flex-1 overflow-y-auto">
-        {tables.length === 0 ? (
+        {isLoading ? (
           <div className="flex items-center justify-center h-20">
             <span className="text-xs text-slate-600">Loading…</span>
+          </div>
+        ) : loadError ? (
+          <div className="px-3 py-4">
+            <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
+              <div>{loadError}</div>
+              <button
+                onClick={() => void loadTables()}
+                className="mt-2 text-[11px] font-medium text-amber-200 hover:text-white"
+              >
+                Retry
+              </button>
+            </div>
+          </div>
+        ) : filtered.length === 0 ? (
+          <div className="flex items-center justify-center h-20">
+            <span className="text-xs text-slate-600">
+              {tables.length === 0 ? 'No tables available' : 'No matching tables'}
+            </span>
           </div>
         ) : (
           filtered.map((name) => (
